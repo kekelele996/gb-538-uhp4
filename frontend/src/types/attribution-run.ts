@@ -56,3 +56,49 @@ export interface CreateAttributionRun {
   measurement_ids: number[]
   source_profile_ids: number[]
 }
+
+export interface AttributionComparisonRun {
+  run_id: number
+  run_code: string
+  algorithm_version: string
+  measurement_count: number
+  source_count: number
+  monitoring_point_ids: number[]
+  monitoring_points: string[]
+  finished_at: string | null
+}
+
+export interface AttributionSourceDelta {
+  source_profile_id: number
+  source_code: string
+  source_name: string
+  base_contribution_pct: number
+  other_contribution_pct: number
+  delta_pct: number
+  in_base: boolean
+  in_other: boolean
+}
+
+export interface AttributionBandDelta {
+  band_hz: number
+  base_level_db: number
+  other_level_db: number
+  delta_db: number
+  abs_delta_db: number
+}
+
+export interface AttributionComparison {
+  base_run: AttributionComparisonRun
+  other_run: AttributionComparisonRun
+  comparable: boolean
+  comparability_warnings: string[]
+  residual_delta: number
+  top_source_changed: boolean
+  base_top_source: string
+  other_top_source: string
+  source_deltas: AttributionSourceDelta[]
+  top_band_deltas: AttributionBandDelta[]
+  explanation: string
+  base_run_id: number
+  other_run_id: number
+}

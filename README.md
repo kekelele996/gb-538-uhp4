@@ -15,7 +15,7 @@ NoiseTrace 面向职业卫生工程师、厂区声学分析员和独立复核人
 - 监测点：维护三维坐标、受声区、责任团队和完整 63-8000 Hz 背景谱。
 - 测量工作台：导入八个固定倍频程、生成 SHA-256 checksum、执行质量判定和受控状态迁移。
 - 声源谱：维护设备位置、参考距离、方向性、运行系数和不可变频谱版本。
-- 贡献归因：冻结测量、声源版本、算法版本和输入快照，输出逐频带贡献、总贡献、残差及不可辨识提示。
+- 贡献归因：冻结测量、声源版本、算法版本和输入快照，输出逐频带贡献、总贡献、残差及不可辨识提示；归因页可选择当前运行与另一条历史运行，按声源查看贡献百分点增减与差异最大的三个倍频程，算法版本或监测点集合不一致时先给出不可直接比较提示并保留逐项差异。
 - 独立复核：运行发起人不能确认自己的结果；复核与确认使用条件更新，历史结果不可覆盖。
 - 审计中心：每次业务写入在同一数据库事务中保存操作者、request ID、before/after 和算法元数据。
 
@@ -93,7 +93,7 @@ output/
 | `POST /api/v1/source-profiles/:id/transition` | 启用或废止谱版本 |
 | `GET/POST /api/v1/attribution-runs` | 归因历史和幂等运行 |
 | `GET /api/v1/attribution-runs/:id` | 冻结输入与完整证据 |
-| `GET /api/v1/attribution-runs/:id/compare/:other_id` | 历史结果差异 |
+| `GET /api/v1/attribution-runs/:id/compare/:other_id` | 两条历史结果差异：逐声源贡献百分点、差异最大的三个倍频程与可比性提示 |
 | `POST /api/v1/attribution-runs/:id/review` | 记录独立复核 |
 | `POST /api/v1/attribution-runs/:id/confirm` | 独立确认 |
 | `POST /api/v1/attribution-runs/:id/void` | 作废未确认结果 |

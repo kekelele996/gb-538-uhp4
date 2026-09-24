@@ -229,6 +229,37 @@ func seedMeasurements(points []model.MonitoringPoint, importedBy uint) ([]model.
 }
 
 func seedAttribution(tx *gorm.DB, points []model.MonitoringPoint, measurements []model.NoiseMeasurement, profiles []model.SourceProfile, createdBy uint) error {
+	sourceInputs := buildSeedSourceInputs(profiles)
+	if err := createSeedRun(tx, "AR-SEED-0538", points, measurements, profiles, sourceInputs, createdBy, -20*time.Hour); err != nil {
+		return err
+	}
+	if err := createSeedRun(tx, "AR-SEED-0539", points[:2], measurements[:2], profiles, sourceInputs, createdBy, -6*time.Hour); err != nil {
+		return err
+	}
+	return nil
+}
+
+func buildSeedSourceInputs(profiles []model.SourceProfile) []algorithm.SourceInput {
+	sourceInputs := make([]algorithm.SourceInput, 0, len(profiles))
+	for _, profile := range profiles {
+		var power, directivity algorithm.Spectrum
+		if err := json.Unmarshal([]byte(profile.OctavePowerJSON), &power); err != nil {
+			continue
+		}
+		if err := json.Unmarshal([]byte(profile.DirectivityJSON), &directivity); err != nil {
+			continue
+		}
+		sourceInputs = append(sourceInputs, algorithm.SourceInput{
+			ID: profile.ID, SourceCode: profile.SourceCode, Name: profile.Name,
+			XM: profile.XM, YM: profile.YM, HeightM: profile.HeightM,
+			ReferenceDistanceM: profile.ReferenceDistanceM, Power: power, Directivity: directivity,
+			OperatingFactor: profile.OperatingFactor, Version: profile.Version,
+		})
+	}
+	return sourceInputs
+}
+
+func createSeedRun(tx *gorm.DB, code string, points []model.MonitoringPoint, measurements []model.NoiseMeasurement, profiles []model.SourceProfile, sourceInputs []algorithm.SourceInput, createdBy uint, finishedOffset time.Duration) error {
 	measurementInputs := make([]algorithm.MeasurementInput, 0, len(measurements))
 	for index, measurement := range measurements {
 		var bands, background algorithm.Spectrum
@@ -241,22 +272,6 @@ func seedAttribution(tx *gorm.DB, points []model.MonitoringPoint, measurements [
 		measurementInputs = append(measurementInputs, algorithm.MeasurementInput{
 			ID: measurement.ID, Checksum: measurement.SourceChecksum, Bands: bands,
 			Point: algorithm.PointInput{ID: points[index].ID, PointCode: points[index].PointCode, XM: points[index].XM, YM: points[index].YM, HeightM: points[index].HeightM, Background: background},
-		})
-	}
-	sourceInputs := make([]algorithm.SourceInput, 0, len(profiles))
-	for _, profile := range profiles {
-		var power, directivity algorithm.Spectrum
-		if err := json.Unmarshal([]byte(profile.OctavePowerJSON), &power); err != nil {
-			return err
-		}
-		if err := json.Unmarshal([]byte(profile.DirectivityJSON), &directivity); err != nil {
-			return err
-		}
-		sourceInputs = append(sourceInputs, algorithm.SourceInput{
-			ID: profile.ID, SourceCode: profile.SourceCode, Name: profile.Name,
-			XM: profile.XM, YM: profile.YM, HeightM: profile.HeightM,
-			ReferenceDistanceM: profile.ReferenceDistanceM, Power: power, Directivity: directivity,
-			OperatingFactor: profile.OperatingFactor, Version: profile.Version,
 		})
 	}
 	snapshot := struct {
@@ -272,11 +287,18 @@ func seedAttribution(tx *gorm.DB, points []model.MonitoringPoint, measurements [
 	if err != nil {
 		return err
 	}
-	finished := time.Now().UTC().Add(-20 * time.Hour)
+	measurementIDs := make([]uint, 0, len(measurements))
+	for _, measurement := range measurements {
+		measurementIDs = append(measurementIDs, measurement.ID)
+	}
+	sourceIDs := make([]uint, 0, len(profiles))
+	for _, profile := range profiles {
+		sourceIDs = append(sourceIDs, profile.ID)
+	}
+	finished := time.Now().UTC().Add(finishedOffset)
 	run := model.AttributionRun{
-		RunCode: "AR-SEED-0538", MeasurementIDsJSON: mustSeedJSON([]uint{measurements[0].ID, measurements[1].ID, measurements[2].ID}),
-		SourceProfileIDsJSON: mustSeedJSON([]uint{profiles[0].ID, profiles[1].ID, profiles[2].ID}),
-		AlgorithmVersion:     constants.AlgorithmVersion, InputHash: hash, InputSnapshotJSON: string(snapshotJSON),
+		RunCode: code, MeasurementIDsJSON: mustSeedJSON(measurementIDs), SourceProfileIDsJSON: mustSeedJSON(sourceIDs),
+		AlgorithmVersion: constants.AlgorithmVersion, InputHash: hash, InputSnapshotJSON: string(snapshotJSON),
 		NormalizedBandsJSON: mustSeedJSON(fit.NormalizedBands), ContributionsJSON: mustSeedJSON(fit.Contributions), EvidenceJSON: mustSeedJSON(fit.Evidence),
 		ResidualError: fit.ResidualError, AttributionState: string(constants.AttributionCompleted), Explanation: fit.Explanation,
 		StartedAt: finished.Add(-time.Duration(fit.Evidence.ElapsedMillis) * time.Millisecond), FinishedAt: &finished,

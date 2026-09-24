@@ -68,12 +68,53 @@ type AttributionRunResponse struct {
 	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
+type AttributionComparisonRun struct {
+	RunID              uint       `json:"run_id"`
+	RunCode            string     `json:"run_code"`
+	AlgorithmVersion   string     `json:"algorithm_version"`
+	MeasurementCount   int        `json:"measurement_count"`
+	SourceCount        int        `json:"source_count"`
+	MonitoringPointIDs []uint     `json:"monitoring_point_ids"`
+	MonitoringPoints   []string   `json:"monitoring_points"`
+	FinishedAt         *time.Time `json:"finished_at"`
+}
+
+type AttributionSourceDelta struct {
+	SourceProfileID   uint    `json:"source_profile_id"`
+	SourceCode        string  `json:"source_code"`
+	SourceName        string  `json:"source_name"`
+	BaseContribution  float64 `json:"base_contribution_pct"`
+	OtherContribution float64 `json:"other_contribution_pct"`
+	DeltaPct          float64 `json:"delta_pct"`
+	InBase            bool    `json:"in_base"`
+	InOther           bool    `json:"in_other"`
+}
+
+type AttributionBandDelta struct {
+	BandHz       int     `json:"band_hz"`
+	BaseLevelDB  float64 `json:"base_level_db"`
+	OtherLevelDB float64 `json:"other_level_db"`
+	DeltaDB      float64 `json:"delta_db"`
+	AbsDeltaDB   float64 `json:"abs_delta_db"`
+}
+
 type AttributionComparisonResponse struct {
-	BaseRunID        uint    `json:"base_run_id"`
-	OtherRunID       uint    `json:"other_run_id"`
+	BaseRun  AttributionComparisonRun `json:"base_run"`
+	OtherRun AttributionComparisonRun `json:"other_run"`
+
+	Comparable            bool     `json:"comparable"`
+	ComparabilityWarnings []string `json:"comparability_warnings"`
+
 	ResidualDelta    float64 `json:"residual_delta"`
 	TopSourceChanged bool    `json:"top_source_changed"`
 	BaseTopSource    string  `json:"base_top_source"`
 	OtherTopSource   string  `json:"other_top_source"`
-	Explanation      string  `json:"explanation"`
+
+	SourceDeltas  []AttributionSourceDelta `json:"source_deltas"`
+	TopBandDeltas []AttributionBandDelta   `json:"top_band_deltas"`
+	Explanation   string                   `json:"explanation"`
+
+	// BaseRunID / OtherRunID are kept for clients that consume the flat identifiers.
+	BaseRunID  uint `json:"base_run_id"`
+	OtherRunID uint `json:"other_run_id"`
 }

@@ -93,6 +93,9 @@ code, .hash-text, .request-code { font-family: "SFMono-Regular", Consolas, monos
 .measurement-row { min-height: 88px; grid-template-columns: 34px minmax(0, 1fr) auto; }
 .measurement-row > .state-badge { grid-column: 2 / -1; }
 .run-index { color: var(--blue); font-size: .62rem; font-weight: 850; }
+.run-compare-hint { grid-column: 1 / -1; display: none; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 4px 2px 30px; color: var(--blue); font-size: .6rem; font-weight: 760; cursor: pointer; }
+.run-compare-hint:hover, .run-compare-hint:focus-visible { text-decoration: underline; }
+.entity-row:hover .run-compare-hint, .run-compare-hint:focus-visible { display: inline-flex; }
 .entity-detail { min-width: 0; }
 .detail-heading { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line-strong); }
 .detail-heading h2 { margin: 0; }

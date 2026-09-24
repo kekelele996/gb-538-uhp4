@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -146,27 +147,29 @@ func (s *AttributionRunService) Void(ctx context.Context, id uint, request dto.A
 }
 
 func (s *AttributionRunService) Compare(ctx context.Context, baseID, otherID uint) (dto.AttributionComparisonResponse, error) {
-	base, err := s.Get(ctx, baseID)
+	if baseID == 0 || otherID == 0 {
+		return dto.AttributionComparisonResponse{}, util.Validation("归因运行 ID 无效", fmt.Errorf("comparison run ids must be positive"))
+	}
+	if baseID == otherID {
+		return dto.AttributionComparisonResponse{}, util.Validation("当前运行与历史运行不能是同一条记录", fmt.Errorf("base run %d equals other run", baseID))
+	}
+	baseRun, err := s.repository.Get(ctx, baseID)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, mapRepositoryError(err, "当前归因运行不存在", "归因运行读取冲突")
+	}
+	otherRun, err := s.repository.Get(ctx, otherID)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, mapRepositoryError(err, "历史归因运行不存在", "归因运行读取冲突")
+	}
+	base, err := attributionResponse(baseRun)
 	if err != nil {
 		return dto.AttributionComparisonResponse{}, err
 	}
-	other, err := s.Get(ctx, otherID)
+	other, err := attributionResponse(otherRun)
 	if err != nil {
 		return dto.AttributionComparisonResponse{}, err
 	}
-	baseTop, otherTop := "", ""
-	if len(base.Contributions) > 0 {
-		baseTop = base.Contributions[0].SourceCode
-	}
-	if len(other.Contributions) > 0 {
-		otherTop = other.Contributions[0].SourceCode
-	}
-	return dto.AttributionComparisonResponse{
-		BaseRunID: baseID, OtherRunID: otherID,
-		ResidualDelta:    roundFloat(other.ResidualError-base.ResidualError, 6),
-		TopSourceChanged: baseTop != otherTop, BaseTopSource: baseTop, OtherTopSource: otherTop,
-		Explanation: "比较仅描述两个冻结输入与算法版本的离线结果差异，不覆盖任何历史记录。",
-	}, nil
+	return buildAttributionComparison(base, other), nil
 }
 
 func (s *AttributionRunService) transition(ctx context.Context, id, version uint, to constants.AttributionState, note string, actor model.Actor) (dto.AttributionRunResponse, error) {
@@ -269,6 +272,216 @@ func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, 
 		CreatedBy: run.CreatedBy, ReviewedBy: run.ReviewedBy, ReviewNote: run.ReviewNote,
 		Version: run.Version, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 	}, nil
+}
+
+type frozenSnapshot struct {
+	AlgorithmVersion string `json:"algorithm_version"`
+	Measurements     []struct {
+		ID    uint `json:"id"`
+		Point struct {
+			ID        uint   `json:"id"`
+			PointCode string `json:"point_code"`
+		} `json:"point"`
+	} `json:"measurements"`
+}
+
+type frozenSnapshotPoint struct {
+	ID   uint
+	Code string
+}
+
+// decodeFrozenPoints extracts the monitoring point set frozen inside an
+// attribution run's canonical input snapshot. The snapshot is immutable
+// evidence, so the comparison uses it rather than current entity state.
+func decodeFrozenPoints(raw any) ([]frozenSnapshotPoint, error) {
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("marshal frozen snapshot: %w", err)
+	}
+	var snapshot frozenSnapshot
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode frozen snapshot: %w", err)
+	}
+	seen := make(map[uint]bool, len(snapshot.Measurements))
+	points := make([]frozenSnapshotPoint, 0, len(snapshot.Measurements))
+	for _, measurement := range snapshot.Measurements {
+		if measurement.Point.ID == 0 || seen[measurement.Point.ID] {
+			continue
+		}
+		seen[measurement.Point.ID] = true
+		points = append(points, frozenSnapshotPoint{ID: measurement.Point.ID, Code: measurement.Point.PointCode})
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].ID < points[j].ID })
+	return points, nil
+}
+
+func comparisonSummary(run dto.AttributionRunResponse) (dto.AttributionComparisonRun, []frozenSnapshotPoint, error) {
+	points, err := decodeFrozenPoints(run.InputSnapshot)
+	if err != nil {
+		return dto.AttributionComparisonRun{}, nil, err
+	}
+	pointIDs := make([]uint, 0, len(points))
+	pointCodes := make([]string, 0, len(points))
+	for _, point := range points {
+		pointIDs = append(pointIDs, point.ID)
+		pointCodes = append(pointCodes, point.Code)
+	}
+	return dto.AttributionComparisonRun{
+		RunID: run.ID, RunCode: run.RunCode, AlgorithmVersion: run.AlgorithmVersion,
+		MeasurementCount: len(run.MeasurementIDs), SourceCount: len(run.SourceProfileIDs),
+		MonitoringPointIDs: pointIDs, MonitoringPoints: pointCodes, FinishedAt: run.FinishedAt,
+	}, points, nil
+}
+
+func buildAttributionComparison(base, other dto.AttributionRunResponse) dto.AttributionComparisonResponse {
+	baseSummary, basePoints, err := comparisonSummary(base)
+	otherSummary, otherPoints, otherErr := comparisonSummary(other)
+	if err != nil || otherErr != nil {
+		return dto.AttributionComparisonResponse{
+			BaseRunID: base.ID, OtherRunID: other.ID, BaseRun: baseSummary, OtherRun: otherSummary,
+			SourceDeltas: []dto.AttributionSourceDelta{}, TopBandDeltas: []dto.AttributionBandDelta{},
+			Explanation: "无法解析冻结输入快照，逐项差异不可用；请检查历史记录完整性。",
+		}
+	}
+
+	warnings := make([]string, 0, 2)
+	if base.AlgorithmVersion != other.AlgorithmVersion {
+		warnings = append(warnings, fmt.Sprintf(
+			"两次运行算法版本不同（当前 %s，历史 %s），拟合口径不一致，贡献百分点不能直接比较。",
+			base.AlgorithmVersion, other.AlgorithmVersion,
+		))
+	}
+	basePointSet := make(map[uint]bool, len(basePoints))
+	for _, point := range basePoints {
+		basePointSet[point.ID] = true
+	}
+	otherPointSet := make(map[uint]bool, len(otherPoints))
+	for _, point := range otherPoints {
+		otherPointSet[point.ID] = true
+	}
+	if !sameUintSet(basePointSet, otherPointSet) {
+		warnings = append(warnings, fmt.Sprintf(
+			"两次运行冻结的监测点集合不同（当前 %s，历史 %s），观测对象不一致，差异只能用于判断变化来自哪次冻结输入。",
+			strings.Join(baseSummary.MonitoringPoints, ", "), strings.Join(otherSummary.MonitoringPoints, ", "),
+		))
+	}
+
+	baseTop, otherTop := "", ""
+	if len(base.Contributions) > 0 {
+		baseTop = base.Contributions[0].SourceCode
+	}
+	if len(other.Contributions) > 0 {
+		otherTop = other.Contributions[0].SourceCode
+	}
+
+	response := dto.AttributionComparisonResponse{
+		BaseRunID: base.ID, OtherRunID: other.ID, BaseRun: baseSummary, OtherRun: otherSummary,
+		Comparable:            len(warnings) == 0,
+		ComparabilityWarnings: warnings,
+		ResidualDelta:         roundFloat(other.ResidualError-base.ResidualError, 6),
+		TopSourceChanged:      baseTop != otherTop, BaseTopSource: baseTop, OtherTopSource: otherTop,
+		SourceDeltas:  buildSourceDeltas(base, other),
+		TopBandDeltas: buildTopBandDeltas(base, other, 3),
+		Explanation:   "比较仅描述两个冻结输入与算法版本的离线结果差异，不覆盖任何历史记录；负值表示历史运行低于当前运行。",
+	}
+	return response
+}
+
+func sameUintSet(left, right map[uint]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if !right[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func buildSourceDeltas(base, other dto.AttributionRunResponse) []dto.AttributionSourceDelta {
+	index := make(map[uint]int)
+	deltas := make([]dto.AttributionSourceDelta, 0, len(base.Contributions)+len(other.Contributions))
+	for _, source := range base.Contributions {
+		index[source.SourceProfileID] = len(deltas)
+		deltas = append(deltas, dto.AttributionSourceDelta{
+			SourceProfileID: source.SourceProfileID, SourceCode: source.SourceCode, SourceName: source.SourceName,
+			BaseContribution: source.ContributionPct, InBase: true,
+		})
+	}
+	for _, source := range other.Contributions {
+		if position, ok := index[source.SourceProfileID]; ok {
+			deltas[position].OtherContribution = source.ContributionPct
+			deltas[position].InOther = true
+			deltas[position].DeltaPct = roundFloat(source.ContributionPct-deltas[position].BaseContribution, 3)
+			continue
+		}
+		index[source.SourceProfileID] = len(deltas)
+		deltas = append(deltas, dto.AttributionSourceDelta{
+			SourceProfileID: source.SourceProfileID, SourceCode: source.SourceCode, SourceName: source.SourceName,
+			OtherContribution: source.ContributionPct, InOther: true,
+			DeltaPct: roundFloat(source.ContributionPct, 3),
+		})
+	}
+	// Sources that only exist in the current run carry the full base share as a negative move.
+	for position := range deltas {
+		if deltas[position].InBase && !deltas[position].InOther {
+			deltas[position].DeltaPct = roundFloat(-deltas[position].BaseContribution, 3)
+		}
+	}
+	sort.SliceStable(deltas, func(i, j int) bool {
+		if math.Abs(deltas[i].DeltaPct) != math.Abs(deltas[j].DeltaPct) {
+			return math.Abs(deltas[i].DeltaPct) > math.Abs(deltas[j].DeltaPct)
+		}
+		return deltas[i].SourceCode < deltas[j].SourceCode
+	})
+	return deltas
+}
+
+// aggregateBandEnergy sums every candidate source's predicted relative energy
+// for one octave band, then converts the total back to a dB level so the two
+// frozen runs share an absolute reference.
+func aggregateBandLevel(run dto.AttributionRunResponse, band int) (float64, bool) {
+	total := 0.0
+	present := false
+	for _, source := range run.Contributions {
+		for _, item := range source.Bands {
+			if item.BandHz == band {
+				present = true
+				total += algorithm.DBToRelativeEnergy(item.PredictedDB)
+			}
+		}
+	}
+	if !present {
+		return 0, false
+	}
+	return algorithm.RelativeEnergyToDB(total), true
+}
+
+func buildTopBandDeltas(base, other dto.AttributionRunResponse, limit int) []dto.AttributionBandDelta {
+	deltas := make([]dto.AttributionBandDelta, 0, len(constants.OctaveBands))
+	for _, band := range constants.OctaveBands {
+		baseLevel, baseOK := aggregateBandLevel(base, band)
+		otherLevel, otherOK := aggregateBandLevel(other, band)
+		if !baseOK || !otherOK {
+			continue
+		}
+		difference := roundFloat(otherLevel-baseLevel, 3)
+		deltas = append(deltas, dto.AttributionBandDelta{
+			BandHz: band, BaseLevelDB: roundFloat(baseLevel, 3), OtherLevelDB: roundFloat(otherLevel, 3),
+			DeltaDB: difference, AbsDeltaDB: math.Abs(difference),
+		})
+	}
+	sort.SliceStable(deltas, func(i, j int) bool {
+		if deltas[i].AbsDeltaDB != deltas[j].AbsDeltaDB {
+			return deltas[i].AbsDeltaDB > deltas[j].AbsDeltaDB
+		}
+		return deltas[i].BandHz < deltas[j].BandHz
+	})
+	if len(deltas) > limit {
+		deltas = deltas[:limit]
+	}
+	return deltas
 }
 
 func measurementChecksums(inputs []algorithm.MeasurementInput) []string {

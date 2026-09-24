@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { CircleGauge, Eye, Play, RefreshCw, ShieldCheck } from '@lucide/vue'
+import { CircleGauge, Eye, GitCompareArrows, Play, RefreshCw, ShieldCheck } from '@lucide/vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import AppShell from '../components/common/AppShell.vue'
+import AttributionComparisonPanel from '../components/common/AttributionComparisonPanel.vue'
 import AttributionDetailDrawer from '../components/common/AttributionDetailDrawer.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import StateBadge from '../components/common/StateBadge.vue'
@@ -37,6 +38,18 @@ async function selectRun(run: AttributionRun) {
   try { await store.select(run.id) } catch (error) { ElMessage.error(errorMessage(error)) }
 }
 
+async function compareWith(runId: number) {
+  try {
+    if (store.selected?.id !== runId && store.items.some((item) => item.id === runId)) {
+      const currentId = store.selected?.id
+      if (currentId) await store.select(runId)
+      if (currentId) await store.compare(currentId)
+      return
+    }
+    await store.compare(runId)
+  } catch (error) { ElMessage.error(errorMessage(error)) }
+}
+
 async function createRun() {
   submitting.value = true
   try { await store.create({ measurement_ids: [...form.measurement_ids], source_profile_ids: [...form.source_profile_ids] }); runOpen.value = false; detailOpen.value = true; ElMessage.success('归因运行已完成并冻结证据') }
@@ -64,13 +77,28 @@ async function confirm() {
     <el-skeleton v-if="store.loading" :rows="6" animated />
     <div v-else-if="!store.items.length" class="empty-state"><CircleGauge :size="30" /><h2>尚无归因运行</h2><p>选择 ready 测量与 active 声源后执行第一条冻结计算。</p></div>
     <div v-else class="split-workspace attribution-workspace">
-      <section class="entity-list"><button v-for="item in store.items" :key="item.id" class="entity-row run-row" :class="{ selected: store.selected?.id === item.id }" @click="selectRun(item)"><span class="run-index">{{ item.id }}</span><span><strong>{{ item.run_code }}</strong><small>{{ formatDate(item.finished_at) }}</small></span><StateBadge :state="item.attribution_state" /></button></section>
+      <section class="entity-list">
+        <button v-for="item in store.items" :key="item.id" class="entity-row run-row" :class="{ selected: store.selected?.id === item.id }" @click="selectRun(item)">
+          <span class="run-index">{{ item.id }}</span><span><strong>{{ item.run_code }}</strong><small>{{ formatDate(item.finished_at) }}</small></span><StateBadge :state="item.attribution_state" />
+          <span v-if="store.selected && item.id !== store.selected.id" class="run-compare-hint" role="button" tabindex="0" @click.stop="compareWith(item.id)" @keydown.enter.stop.prevent="compareWith(item.id)"><GitCompareArrows :size="14" /> 对比</span>
+        </button>
+      </section>
       <section v-if="store.selected" class="entity-detail">
         <div class="detail-heading"><div><p class="eyebrow">{{ store.selected.algorithm_version }}</p><h2>{{ store.selected.run_code }}</h2></div><StateBadge :state="store.selected.attribution_state" /></div>
         <div class="run-summary"><div><span>输入哈希</span><strong :title="store.selected.input_hash">{{ shortHash(store.selected.input_hash) }}</strong></div><div><span>测量 / 声源</span><strong>{{ store.selected.measurement_ids.length }} / {{ store.selected.source_profile_ids.length }}</strong></div><div><span>矩阵</span><strong>{{ store.selected.evidence.matrix_rows }} × {{ store.selected.evidence.matrix_columns }}</strong></div><div><span>迭代</span><strong>{{ store.selected.evidence.iterations }}</strong></div></div>
         <div class="ranking-table"><div class="ranking-head"><span>排名</span><span>候选声源</span><span>总贡献</span><span>预测总级</span></div><div v-for="(source, index) in store.selected.contributions" :key="source.source_profile_id" class="ranking-row"><span>{{ String(index + 1).padStart(2, '0') }}</span><span><strong>{{ source.source_name }}</strong><small>{{ source.source_code }}</small></span><b>{{ fixed(source.contribution_pct, 2) }}%</b><span>{{ fixed(source.overall_db, 2) }} dB</span></div></div>
         <div v-if="store.selected.evidence.warnings.length" class="warning-list"><strong>解释性提示</strong><span v-for="warning in store.selected.evidence.warnings" :key="warning">{{ warning }}</span></div>
         <div class="detail-actions"><el-button :icon="Eye" @click="detailOpen = true">计算证据</el-button><el-button v-if="canReviewSelected" type="primary" plain @click="reviewOpen = true">记录复核</el-button><el-button v-if="canConfirmSelected" type="primary" :icon="ShieldCheck" @click="confirm">独立确认</el-button></div>
+        <AttributionComparisonPanel
+          :base="store.selected"
+          :items="store.items"
+          :other-run-id="store.comparisonOtherId"
+          :comparison="store.comparison"
+          :loading="store.comparisonLoading"
+          :error="store.comparisonError"
+          @select="compareWith"
+          @clear="store.clearComparison"
+        />
       </section>
     </div>
   </div></AppShell>
