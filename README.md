@@ -93,7 +93,7 @@ output/
 | `POST /api/v1/source-profiles/:id/transition` | 启用或废止谱版本 |
 | `GET/POST /api/v1/attribution-runs` | 归因历史和幂等运行 |
 | `GET /api/v1/attribution-runs/:id` | 冻结输入与完整证据 |
-| `GET /api/v1/attribution-runs/:id/compare/:other_id` | 历史结果差异 |
+| `GET /api/v1/attribution-runs/:id/compare/:other_id` | 历史结果差异：逐声源贡献百分点增减、差异最大的三个倍频程与不可直接比较提示 |
 | `POST /api/v1/attribution-runs/:id/review` | 记录独立复核 |
 | `POST /api/v1/attribution-runs/:id/confirm` | 独立确认 |
 | `POST /api/v1/attribution-runs/:id/void` | 作废未确认结果 |

@@ -68,12 +68,48 @@ type AttributionRunResponse struct {
 	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
+type AttributionComparisonSource struct {
+	SourceProfileID uint    `json:"source_profile_id"`
+	SourceCode      string  `json:"source_code"`
+	SourceName      string  `json:"source_name"`
+	InBase          bool    `json:"in_base"`
+	InOther         bool    `json:"in_other"`
+	BasePct         float64 `json:"base_pct"`
+	OtherPct        float64 `json:"other_pct"`
+	DeltaPct        float64 `json:"delta_pct"`
+	BaseOverallDB   float64 `json:"base_overall_db"`
+	OtherOverallDB  float64 `json:"other_overall_db"`
+}
+
+type AttributionComparisonBand struct {
+	BandHz           int     `json:"band_hz"`
+	BaseObservedDB   float64 `json:"base_observed_db"`
+	OtherObservedDB  float64 `json:"other_observed_db"`
+	ObservedDeltaDB  float64 `json:"observed_delta_db"`
+	BasePredictedDB  float64 `json:"base_predicted_db"`
+	OtherPredictedDB float64 `json:"other_predicted_db"`
+	PredictedDeltaDB float64 `json:"predicted_delta_db"`
+}
+
 type AttributionComparisonResponse struct {
-	BaseRunID        uint    `json:"base_run_id"`
-	OtherRunID       uint    `json:"other_run_id"`
-	ResidualDelta    float64 `json:"residual_delta"`
-	TopSourceChanged bool    `json:"top_source_changed"`
-	BaseTopSource    string  `json:"base_top_source"`
-	OtherTopSource   string  `json:"other_top_source"`
-	Explanation      string  `json:"explanation"`
+	BaseRunID              uint                          `json:"base_run_id"`
+	OtherRunID             uint                          `json:"other_run_id"`
+	BaseRunCode            string                        `json:"base_run_code"`
+	OtherRunCode           string                        `json:"other_run_code"`
+	BaseAlgorithmVersion   string                        `json:"base_algorithm_version"`
+	OtherAlgorithmVersion  string                        `json:"other_algorithm_version"`
+	BaseMeasurementIDs     []uint                        `json:"base_measurement_ids"`
+	OtherMeasurementIDs    []uint                        `json:"other_measurement_ids"`
+	BasePointIDs           []uint                        `json:"base_point_ids"`
+	OtherPointIDs          []uint                        `json:"other_point_ids"`
+	Comparable             bool                          `json:"comparable"`
+	IncomparabilityReasons []string                      `json:"incomparability_reasons"`
+	ResidualDelta          float64                       `json:"residual_delta"`
+	TopSourceChanged       bool                          `json:"top_source_changed"`
+	BaseTopSource          string                        `json:"base_top_source"`
+	OtherTopSource         string                        `json:"other_top_source"`
+	SourceDeltas           []AttributionComparisonSource `json:"source_deltas"`
+	BandDeltas             []AttributionComparisonBand   `json:"band_deltas"`
+	TopBandDeltas          []AttributionComparisonBand   `json:"top_band_deltas"`
+	Explanation            string                        `json:"explanation"`
 }

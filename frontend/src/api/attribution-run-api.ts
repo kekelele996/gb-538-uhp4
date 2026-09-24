@@ -1,9 +1,11 @@
 import { api, json } from './client'
-import type { AttributionRun, CreateAttributionRun } from '../types/attribution-run'
+import type { AttributionComparison, AttributionRun, CreateAttributionRun } from '../types/attribution-run'
 
 export const attributionRunApi = {
   list: () => api<AttributionRun[]>('/attribution-runs'),
   get: (id: number) => api<AttributionRun>(`/attribution-runs/${id}`),
+  compare: (baseId: number, otherId: number) =>
+    api<AttributionComparison>(`/attribution-runs/${baseId}/compare/${otherId}`),
   create: (value: CreateAttributionRun, idempotencyKey: string) =>
     api<AttributionRun>('/attribution-runs', json('POST', value, { 'Idempotency-Key': idempotencyKey })),
   review: (id: number, version: number, note: string) =>

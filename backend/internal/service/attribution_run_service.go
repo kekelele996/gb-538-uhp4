@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -145,15 +146,89 @@ func (s *AttributionRunService) Void(ctx context.Context, id uint, request dto.A
 	return s.transition(ctx, id, request.Version, constants.AttributionVoided, "", actor)
 }
 
+type comparisonInput struct {
+	RunCode          string
+	AlgorithmVersion string
+	MeasurementIDs   []uint
+	PointIDs         []uint
+	Normalized       []algorithm.Spectrum
+	Contributions    []dto.SourceContribution
+	ResidualError    float64
+}
+
+type comparisonSnapshot struct {
+	Measurements []algorithm.MeasurementInput `json:"measurements"`
+}
+
 func (s *AttributionRunService) Compare(ctx context.Context, baseID, otherID uint) (dto.AttributionComparisonResponse, error) {
-	base, err := s.Get(ctx, baseID)
+	if baseID == otherID {
+		return dto.AttributionComparisonResponse{}, util.Validation("对比必须选择两条不同的归因运行", nil)
+	}
+	baseRun, err := s.repository.Get(ctx, baseID)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, mapRepositoryError(err, "归因运行不存在", "归因运行读取冲突")
+	}
+	otherRun, err := s.repository.Get(ctx, otherID)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, mapRepositoryError(err, "对比归因运行不存在", "归因运行读取冲突")
+	}
+	baseResponse, err := attributionResponse(baseRun)
 	if err != nil {
 		return dto.AttributionComparisonResponse{}, err
 	}
-	other, err := s.Get(ctx, otherID)
+	otherResponse, err := attributionResponse(otherRun)
 	if err != nil {
 		return dto.AttributionComparisonResponse{}, err
 	}
+	baseInput, err := buildComparisonInput(baseResponse, baseRun.NormalizedBandsJSON, baseRun.InputSnapshotJSON)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, err
+	}
+	otherInput, err := buildComparisonInput(otherResponse, otherRun.NormalizedBandsJSON, otherRun.InputSnapshotJSON)
+	if err != nil {
+		return dto.AttributionComparisonResponse{}, err
+	}
+	return buildAttributionComparison(baseID, otherID, baseInput, otherInput), nil
+}
+
+func buildComparisonInput(response dto.AttributionRunResponse, normalizedJSON, snapshotJSON string) (comparisonInput, error) {
+	var normalized []algorithm.Spectrum
+	if err := json.Unmarshal([]byte(normalizedJSON), &normalized); err != nil {
+		return comparisonInput{}, fmt.Errorf("decode stored normalized bands: %w", err)
+	}
+	var snapshot comparisonSnapshot
+	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+		return comparisonInput{}, fmt.Errorf("decode stored input snapshot: %w", err)
+	}
+	pointIDs := make([]uint, 0, len(snapshot.Measurements))
+	seen := make(map[uint]bool, len(snapshot.Measurements))
+	for _, measurement := range snapshot.Measurements {
+		if !seen[measurement.Point.ID] {
+			seen[measurement.Point.ID] = true
+			pointIDs = append(pointIDs, measurement.Point.ID)
+		}
+	}
+	sort.Slice(pointIDs, func(i, j int) bool { return pointIDs[i] < pointIDs[j] })
+	return comparisonInput{
+		RunCode: response.RunCode, AlgorithmVersion: response.AlgorithmVersion,
+		MeasurementIDs: response.MeasurementIDs, PointIDs: pointIDs, Normalized: normalized,
+		Contributions: response.Contributions, ResidualError: response.ResidualError,
+	}, nil
+}
+
+func buildAttributionComparison(baseID, otherID uint, base, other comparisonInput) dto.AttributionComparisonResponse {
+	basePointIDs, otherPointIDs := base.PointIDs, other.PointIDs
+	algorithmMatch := base.AlgorithmVersion == other.AlgorithmVersion
+	pointsMatch := uintSliceEqual(basePointIDs, otherPointIDs)
+	reasons := make([]string, 0, 2)
+	if !algorithmMatch {
+		reasons = append(reasons, fmt.Sprintf("算法版本不同（当前 %s，历史 %s），贡献百分点不能直接比较。", base.AlgorithmVersion, other.AlgorithmVersion))
+	}
+	if !pointsMatch {
+		reasons = append(reasons, fmt.Sprintf("监测点集合不同（当前 %s，历史 %s），频带能量量级与覆盖工况不一致。",
+			formatUintList(basePointIDs), formatUintList(otherPointIDs)))
+	}
+
 	baseTop, otherTop := "", ""
 	if len(base.Contributions) > 0 {
 		baseTop = base.Contributions[0].SourceCode
@@ -161,12 +236,164 @@ func (s *AttributionRunService) Compare(ctx context.Context, baseID, otherID uin
 	if len(other.Contributions) > 0 {
 		otherTop = other.Contributions[0].SourceCode
 	}
+
+	sourceIndex := make(map[uint]dto.SourceContribution, len(base.Contributions)+len(other.Contributions))
+	for _, source := range base.Contributions {
+		sourceIndex[source.SourceProfileID] = source
+	}
+	for _, source := range other.Contributions {
+		if _, exists := sourceIndex[source.SourceProfileID]; !exists {
+			sourceIndex[source.SourceProfileID] = source
+		}
+	}
+	sourceIDs := make([]uint, 0, len(sourceIndex))
+	for id := range sourceIndex {
+		sourceIDs = append(sourceIDs, id)
+	}
+	sort.Slice(sourceIDs, func(i, j int) bool { return sourceIDs[i] < sourceIDs[j] })
+	sourceDeltas := make([]dto.AttributionComparisonSource, 0, len(sourceIDs))
+	for _, id := range sourceIDs {
+		baseSource, inBase := findContribution(base.Contributions, id)
+		otherSource, inOther := findContribution(other.Contributions, id)
+		entry := dto.AttributionComparisonSource{
+			SourceProfileID: id, InBase: inBase, InOther: inOther,
+			SourceCode: firstSourceCode(baseSource, otherSource), SourceName: firstSourceName(baseSource, otherSource),
+		}
+		if inBase {
+			entry.BasePct, entry.BaseOverallDB = baseSource.ContributionPct, baseSource.OverallDB
+		}
+		if inOther {
+			entry.OtherPct, entry.OtherOverallDB = otherSource.ContributionPct, otherSource.OverallDB
+		}
+		if inBase && inOther {
+			entry.DeltaPct = roundFloat(entry.OtherPct-entry.BasePct, 3)
+		}
+		sourceDeltas = append(sourceDeltas, entry)
+	}
+	sort.SliceStable(sourceDeltas, func(i, j int) bool {
+		if math.Abs(sourceDeltas[i].DeltaPct) != math.Abs(sourceDeltas[j].DeltaPct) {
+			return math.Abs(sourceDeltas[i].DeltaPct) > math.Abs(sourceDeltas[j].DeltaPct)
+		}
+		return sourceDeltas[i].SourceProfileID < sourceDeltas[j].SourceProfileID
+	})
+
+	bandDeltas := make([]dto.AttributionComparisonBand, 0, len(constants.OctaveBands))
+	for _, band := range constants.OctaveBands {
+		baseObserved := roundFloat(meanObservedBandDB(base.Normalized, band), 3)
+		otherObserved := roundFloat(meanObservedBandDB(other.Normalized, band), 3)
+		basePredicted := roundFloat(meanPredictedBandDB(base.Contributions, band, len(base.Normalized)), 3)
+		otherPredicted := roundFloat(meanPredictedBandDB(other.Contributions, band, len(other.Normalized)), 3)
+		bandDeltas = append(bandDeltas, dto.AttributionComparisonBand{
+			BandHz:         band,
+			BaseObservedDB: baseObserved, OtherObservedDB: otherObserved,
+			ObservedDeltaDB: roundFloat(otherObserved-baseObserved, 3),
+			BasePredictedDB: basePredicted, OtherPredictedDB: otherPredicted,
+			PredictedDeltaDB: roundFloat(otherPredicted-basePredicted, 3),
+		})
+	}
+	topBands := append([]dto.AttributionComparisonBand(nil), bandDeltas...)
+	sort.SliceStable(topBands, func(i, j int) bool {
+		left := math.Max(math.Abs(topBands[i].ObservedDeltaDB), math.Abs(topBands[i].PredictedDeltaDB))
+		right := math.Max(math.Abs(topBands[j].ObservedDeltaDB), math.Abs(topBands[j].PredictedDeltaDB))
+		if left != right {
+			return left > right
+		}
+		return topBands[i].BandHz < topBands[j].BandHz
+	})
+	if len(topBands) > 3 {
+		topBands = topBands[:3]
+	}
+
+	explanation := "对比仅描述两个冻结输入与算法版本的离线结果差异，不覆盖任何历史记录；差值统一为历史运行减当前运行。"
+	if !algorithmMatch || !pointsMatch {
+		explanation = "两次运行不能直接比较，以下逐项差异仍保留，可用于判断变化来自哪次冻结输入（测量、声源版本、坐标或算法）。"
+	}
 	return dto.AttributionComparisonResponse{
 		BaseRunID: baseID, OtherRunID: otherID,
+		BaseRunCode: base.RunCode, OtherRunCode: other.RunCode,
+		BaseAlgorithmVersion: base.AlgorithmVersion, OtherAlgorithmVersion: other.AlgorithmVersion,
+		BaseMeasurementIDs: base.MeasurementIDs, OtherMeasurementIDs: other.MeasurementIDs,
+		BasePointIDs: basePointIDs, OtherPointIDs: otherPointIDs,
+		Comparable: algorithmMatch && pointsMatch, IncomparabilityReasons: reasons,
 		ResidualDelta:    roundFloat(other.ResidualError-base.ResidualError, 6),
 		TopSourceChanged: baseTop != otherTop, BaseTopSource: baseTop, OtherTopSource: otherTop,
-		Explanation: "比较仅描述两个冻结输入与算法版本的离线结果差异，不覆盖任何历史记录。",
-	}, nil
+		SourceDeltas: sourceDeltas, BandDeltas: bandDeltas, TopBandDeltas: topBands,
+		Explanation: explanation,
+	}
+}
+
+func findContribution(contributions []dto.SourceContribution, id uint) (dto.SourceContribution, bool) {
+	for _, source := range contributions {
+		if source.SourceProfileID == id {
+			return source, true
+		}
+	}
+	return dto.SourceContribution{}, false
+}
+
+func firstSourceCode(base, other dto.SourceContribution) string {
+	if base.SourceCode != "" {
+		return base.SourceCode
+	}
+	return other.SourceCode
+}
+
+func firstSourceName(base, other dto.SourceContribution) string {
+	if base.SourceName != "" {
+		return base.SourceName
+	}
+	return other.SourceName
+}
+
+func meanObservedBandDB(normalized []algorithm.Spectrum, band int) float64 {
+	if len(normalized) == 0 {
+		return algorithm.RelativeEnergyToDB(0)
+	}
+	energy := 0.0
+	key := algorithm.BandKey(band)
+	for _, spectrum := range normalized {
+		energy += algorithm.DBToRelativeEnergy(spectrum[key])
+	}
+	return algorithm.RelativeEnergyToDB(energy / float64(len(normalized)))
+}
+
+func meanPredictedBandDB(contributions []dto.SourceContribution, band int, measurementCount int) float64 {
+	if measurementCount <= 0 {
+		measurementCount = 1
+	}
+	energy := 0.0
+	for _, source := range contributions {
+		for _, item := range source.Bands {
+			if item.BandHz == band {
+				energy += algorithm.DBToRelativeEnergy(item.PredictedDB)
+				break
+			}
+		}
+	}
+	return algorithm.RelativeEnergyToDB(energy / float64(measurementCount))
+}
+
+func uintSliceEqual(left, right []uint) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func formatUintList(values []uint) string {
+	if len(values) == 0 {
+		return "—"
+	}
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = fmt.Sprintf("%d", value)
+	}
+	return "#" + strings.Join(parts, ", #")
 }
 
 func (s *AttributionRunService) transition(ctx context.Context, id, version uint, to constants.AttributionState, note string, actor model.Actor) (dto.AttributionRunResponse, error) {
